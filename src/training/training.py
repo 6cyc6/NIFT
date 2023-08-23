@@ -43,10 +43,17 @@ def multiscale_training(model, lr, steps_til_summary, epochs_til_checkpoint, mod
 
 def train_scf_occ(model, train_dataloader, epochs, lr, steps_til_summary, epochs_til_checkpoint, model_dir, loss_fn,
                   summary_fn=None, iters_til_checkpoint=None, val_dataloader=None, clip_grad=False, val_loss_fn=None,
-                  overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0, max_steps=None):
+                  overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0, mtl=False,
+                  lw=0.5, max_steps=None):
 
     if optimizers is None:
-        optimizers = [torch.optim.Adam(lr=lr, params=model.parameters())]
+        if mtl:
+            log_var_occ = torch.zeros((1,), requires_grad=True, device="cuda")
+            log_var_scf = torch.zeros((1,), requires_grad=True, device="cuda")
+            params = ([p for p in model.parameters()] + [log_var_occ] + [log_var_scf])
+            optimizers = [torch.optim.Adam(lr=lr, params=params)]
+        else:
+            optimizers = [torch.optim.Adam(lr=lr, params=model.parameters())]
 
     if val_dataloader is not None:
         assert val_loss_fn is not None, "If validation set is passed, have to pass a validation loss_fn!"
@@ -74,6 +81,8 @@ def train_scf_occ(model, train_dataloader, epochs, lr, steps_til_summary, epochs
     total_steps = 0
     with tqdm(total=len(train_dataloader) * epochs) as pbar:
         train_losses = []
+        train_occ_losses = []
+        train_scf_losses = []
         for epoch in range(epochs):
             if not epoch % epochs_til_checkpoint and epoch and rank == 0:
                 torch.save(model.state_dict(),
@@ -88,17 +97,32 @@ def train_scf_occ(model, train_dataloader, epochs, lr, steps_til_summary, epochs
                 start_time = time.time()
 
                 model_output = model(model_input)
-                losses = occ_sdf_net(model_output, gt)
+                losses = loss_fn(model_output, gt)
                 # losses = loss_fn(model_output, gt, model_input, model)
 
                 train_loss = 0.
                 for loss_name, loss in losses.items():
                     single_loss = loss.mean()
-                    if loss_name == "scf":
-                        single_loss *= 10
-
                     if rank == 0:
                         writer.add_scalar(loss_name, single_loss, total_steps)
+                    if mtl:
+                        if loss_name == "occ":
+                            single_loss = torch.exp(-log_var_occ) * single_loss + log_var_occ
+                        else:
+                            single_loss = torch.exp(-log_var_scf) * single_loss + log_var_scf
+                    else:
+                        if loss_name == "scf":
+                            single_loss *= lw
+                        else:
+                            single_loss *= (1 - lw)
+
+                    # if loss_name == "occ":
+                    #     train_occ_losses.append(single_loss.item())
+                    # else:
+                    #     train_scf_losses.append(single_loss.item())
+
+                    if rank == 0:
+                        writer.add_scalar("train_weighted_" + loss_name, single_loss, total_steps)
                     train_loss += single_loss
 
                 train_losses.append(train_loss.item())
@@ -131,7 +155,7 @@ def train_scf_occ(model, train_dataloader, epochs, lr, steps_til_summary, epochs
 
                 if not total_steps % steps_til_summary and rank == 0:
                     print("Epoch %d, Total loss %0.6f, iteration time %0.6f" % (epoch, train_loss, time.time() - start_time))
-
+                    loss_sum = 0
                     if val_dataloader is not None:
                         print("Running validation set...")
                         with torch.no_grad():
@@ -152,9 +176,36 @@ def train_scf_occ(model, train_dataloader, epochs, lr, steps_til_summary, epochs
 
                         for loss_name, loss in val_losses.items():
                             single_loss = np.mean(loss)
-                            summary_fn(model, model_input, gt, model_output, writer, total_steps, 'val_')
                             writer.add_scalar('val_' + loss_name, single_loss, total_steps)
 
+                            if loss_name == "occ":
+                                print(f"occ_loss: {single_loss}")
+                            else:
+                                print(f"scf_loss: {single_loss}")
+
+                            if mtl:
+                                if loss_name == "occ":
+                                    log_var_occ_np = log_var_occ.detach().cpu().numpy()
+                                    single_loss = np.exp(-log_var_occ_np) * single_loss + log_var_occ_np
+                                else:
+                                    log_var_scf_np = log_var_scf.detach().cpu().numpy()
+                                    single_loss = np.exp(-log_var_scf_np) * single_loss + log_var_scf_np
+                            else:
+                                if loss_name == "scf":
+                                    single_loss *= lw
+                                else:
+                                    single_loss *= (1 - lw)
+
+                            if loss_name == "occ":
+                                print(f"weighted_occ_loss: {single_loss}")
+                            else:
+                                print(f"weighted_scf_loss: {single_loss}")
+                            summary_fn(model, model_input, gt, model_output, writer, total_steps, 'val_')
+                            writer.add_scalar('val_weighted' + loss_name, single_loss, total_steps)
+
+                            loss_sum += single_loss
+
+                        print(f"total_loss: {loss_sum}")
                         model.train()
 
                 if (iters_til_checkpoint is not None) and (not total_steps % iters_til_checkpoint) and rank == 0:

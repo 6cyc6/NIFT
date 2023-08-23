@@ -57,13 +57,13 @@ class VNN_DGCNN(nn.Module):
         return x
 
 
-class VNNOccScfNet(nn.Module):
+class VNNOccScfNetMulti(nn.Module):
     def __init__(self,
                  latent_dim,
                  o_dim=1,
                  model_type='pointnet',
                  sigmoid=True,
-                 return_features=False, 
+                 return_features=False,
                  acts='all',
                  scaling=10.0):
         super().__init__()
@@ -79,7 +79,69 @@ class VNNOccScfNet(nn.Module):
             self.model_type = 'pointnet'
             self.encoder = VNN_ResnetPointnet(c_dim=latent_dim)  # modified resnet-18
 
-        self.decoder = DecoderInnerMultiHead(dim=3, z_dim=latent_dim, c_dim=0, o_dim=1, hidden_size=latent_dim, leaky=True, sigmoid=sigmoid, return_features=return_features, acts=acts)
+        self.decoder_scf = DecoderInner(dim=3, z_dim=latent_dim, c_dim=0, o_dim=5, hidden_size=latent_dim,
+                                        leaky=True, sigmoid=False, return_features=return_features, acts=acts)
+        self.decoder_occ = DecoderInner(dim=3, z_dim=latent_dim, c_dim=0, o_dim=1, hidden_size=latent_dim,
+                                        leaky=True, sigmoid=sigmoid, return_features=return_features, acts=acts)
+
+    def forward(self, input):
+        out_dict = {}
+
+        enc_in = input['point_cloud'] * self.scaling
+        query_points = input['coords'] * self.scaling
+
+        z = self.encoder(enc_in)
+
+        if self.return_features:
+            out_dict['occ'], out_dict['features_occ'] = self.decoder_occ(query_points, z)
+            out_dict['scf'], out_dict['features_scf'] = self.decoder_scf(query_points, z)
+        else:
+            out_dict['occ'] = self.decoder_occ(query_points, z)
+            out_dict['scf'] = self.decoder_scf(query_points, z)
+
+        return out_dict
+
+    def extract_latent(self, input):
+        enc_in = input['point_cloud'] * self.scaling
+        z = self.encoder(enc_in)
+        return z
+
+    def forward_latent(self, z, coords, return_dict=False):
+        out_dict = {}
+        coords = coords * self.scaling
+        out_dict['occ'], out_dict['features_occ'] = self.decoder_occ(coords, z)
+        out_dict['scf'], out_dict['features_scf'] = self.decoder_scf(coords, z)
+
+        if return_dict:
+            return out_dict
+
+        return out_dict['features_occ'], out_dict['features_scf']
+
+
+class VNNOccScfNet(nn.Module):
+    def __init__(self,
+                 latent_dim,
+                 o_dim=1,
+                 model_type='pointnet',
+                 sigmoid=True,
+                 return_features=False,
+                 acts='all',
+                 scaling=10.0):
+        super().__init__()
+
+        self.latent_dim = latent_dim
+        self.scaling = scaling  # scaling up the point cloud/query points to be larger helps
+        self.return_features = return_features
+
+        if model_type == 'dgcnn':
+            self.model_type = 'dgcnn'
+            self.encoder = VNN_DGCNN(c_dim=latent_dim)  # modified resnet-18
+        else:
+            self.model_type = 'pointnet'
+            self.encoder = VNN_ResnetPointnet(c_dim=latent_dim)  # modified resnet-18
+
+        self.decoder = DecoderInnerMultiHead(dim=3, z_dim=latent_dim, c_dim=0, o_dim=1, hidden_size=latent_dim,
+                                             leaky=True, sigmoid=sigmoid, return_features=return_features, acts=acts)
 
     def forward(self, input):
         out_dict = {}
@@ -216,7 +278,7 @@ class DecoderInnerMultiHead(nn.Module):
 
         self.acts = acts
         if self.acts not in ['all', 'inp', 'first_rn', 'inp_first_rn']:
-            #self.acts = 'all'
+            # self.acts = 'all'
             raise ValueError('Please provide "acts" equal to one of the following: "all", "inp", "first_rn", "inp_first_rn"')
 
         # Submodules
@@ -302,7 +364,7 @@ class DecoderInnerMultiHead(nn.Module):
             out_occ = F.sigmoid(out_occ)
 
         if self.return_features:
-            #acts = torch.cat(acts, dim=-1)
+            # acts = torch.cat(acts, dim=-1)
             if self.acts == 'all':
                 acts = torch.cat(acts, dim=-1)
             elif self.acts == 'inp':
@@ -315,6 +377,126 @@ class DecoderInnerMultiHead(nn.Module):
             return out_occ, out_scf, acts
         else:
             return out_occ, out_scf
+
+
+class DecoderInner(nn.Module):
+    ''' Decoder class.
+
+    It does not perform any form of normalization.
+
+    Args:
+        dim (int): input dimension
+        z_dim (int): dimension of latent code z
+        c_dim (int): dimension of latent conditioned code c
+        hidden_size (int): hidden size of Decoder network
+        leaky (bool): whether to use leaky ReLUs
+    '''
+
+    def __init__(self, dim=3, z_dim=128, c_dim=128, o_dim=1,
+                 hidden_size=128, leaky=False, return_features=False, sigmoid=True, acts='all'):
+        super().__init__()
+        self.z_dim = z_dim
+        self.c_dim = c_dim
+        self.o_dim = o_dim
+
+        self.acts = acts
+        if self.acts not in ['all', 'inp', 'first_rn', 'inp_first_rn']:
+            #self.acts = 'all'
+            raise ValueError('Please provide "acts" equal to one of the following: "all", "inp", "first_rn", "inp_first_rn"')
+
+        # Submodules
+        if z_dim > 0:
+            self.z_in = VNLinear(z_dim, z_dim)
+        if c_dim > 0:
+            self.c_in = VNLinear(c_dim, c_dim)
+
+        self.fc_in = nn.Linear(z_dim*2+c_dim*2+1, hidden_size)
+
+        self.block0 = ResnetBlockFC(hidden_size)
+        self.block1 = ResnetBlockFC(hidden_size)
+        self.block2 = ResnetBlockFC(hidden_size)
+        self.block3 = ResnetBlockFC(hidden_size)
+        self.block4 = ResnetBlockFC(hidden_size)
+        self.return_features = return_features
+
+        self.fc_out = nn.Linear(hidden_size, o_dim)
+        self.sigmoid = sigmoid
+
+        if not leaky:
+            self.actvn = F.relu
+        else:
+            self.actvn = lambda x: F.leaky_relu(x, 0.2)
+
+    def forward(self, p, z, c=None, **kwargs):
+        batch_size, T, D = p.size()
+        acts = []
+        acts_inp = []
+        acts_first_rn = []
+        acts_inp_first_rn = []
+
+        if isinstance(c, tuple):
+            c, c_meta = c
+
+        net = (p * p).sum(2, keepdim=True)
+
+        if self.z_dim != 0:
+            z = z.view(batch_size, -1, D).contiguous()
+            net_z = torch.einsum('bmi,bni->bmn', p, z)
+            z_dir = self.z_in(z)
+            z_inv = (z * z_dir).sum(-1).unsqueeze(1).repeat(1, T, 1)
+            net = torch.cat([net, net_z, z_inv], dim=2)
+
+        if self.c_dim != 0:
+            c = c.view(batch_size, -1, D).contiguous()
+            net_c = torch.einsum('bmi,bni->bmn', p, c)
+            c_dir = self.c_in(c)
+            c_inv = (c * c_dir).sum(-1).unsqueeze(1).repeat(1, T, 1)
+            net = torch.cat([net, net_c, c_inv], dim=2)
+
+        acts.append(net)
+        acts_inp.append(net)
+        acts_inp_first_rn.append(net)
+
+        net = self.fc_in(net)
+        acts.append(net)
+        # acts_inp.append(net)
+        # acts_inp_first_rn.append(net)
+
+        net = self.block0(net)
+        acts.append(net)
+        # acts_inp_first_rn.append(net)
+        acts_first_rn.append(net)
+
+        net = self.block1(net)
+        acts.append(net)
+        net = self.block2(net)
+        acts.append(net)
+        net = self.block3(net)
+        acts.append(net)
+        net = self.block4(net)
+        last_act = net
+        acts.append(net)
+
+        out = self.fc_out(self.actvn(net))
+        out = out.squeeze(-1)
+
+        if self.sigmoid:
+            out = F.sigmoid(out)
+
+        if self.return_features:
+            # acts = torch.cat(acts, dim=-1)
+            if self.acts == 'all':
+                acts = torch.cat(acts, dim=-1)
+            elif self.acts == 'inp':
+                acts = torch.cat(acts_inp, dim=-1)
+            elif self.acts == 'last':
+                acts = last_act
+            elif self.acts == 'inp_first_rn':
+                acts = torch.cat(acts_inp_first_rn, dim=-1)
+            acts = F.normalize(acts, p=2, dim=-1)
+            return out, acts
+        else:
+            return out
 
 
 class DecoderCBatchNorm(nn.Module):
