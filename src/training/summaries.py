@@ -24,6 +24,7 @@ def scf_net(model, model_input, ground_truth, model_output, writer, iter, prefix
     """
     pass
 
+
 def occupancy(model, model_input, ground_truth, model_output, writer, iter, prefix=""):
     """Writes tensorboard summaries using tensorboardx api.
 
@@ -257,6 +258,7 @@ def semantic_occupancy(model, model_input, ground_truth, model_output, writer, i
     ax.set_zlim([min_coords[2], max_coords[2]])
 
     writer.add_figure(prefix + 'pred_occupancies', fig, global_step=iter)
+
 
 def point_cloud(writer, iter, name, points_xyz, colors=None):
     point_size_config = {

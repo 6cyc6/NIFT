@@ -3,6 +3,7 @@ import torch.nn as nn
 from .layers_equi import *
 import torch.nn.functional as F
 
+
 def maxpool(x, dim=-1, keepdim=False):
     out, _ = x.max(dim=dim, keepdim=keepdim)
     return out
@@ -11,6 +12,7 @@ def maxpool(x, dim=-1, keepdim=False):
 def meanpool(x, dim=-1, keepdim=False):
     out = x.mean(dim=dim, keepdim=keepdim)
     return out
+
 
 class VNN_DGCNN(nn.Module):
     def __init__(self, c_dim=128, dim=3, hidden_dim=64, k=20):
@@ -79,10 +81,10 @@ class VNNOccScfNetMulti(nn.Module):
             self.model_type = 'pointnet'
             self.encoder = VNN_ResnetPointnet(c_dim=latent_dim)  # modified resnet-18
 
-        self.decoder_scf = DecoderInner(dim=3, z_dim=latent_dim, c_dim=0, o_dim=5, hidden_size=latent_dim,
-                                        leaky=True, sigmoid=False, return_features=return_features, acts=acts)
         self.decoder_occ = DecoderInner(dim=3, z_dim=latent_dim, c_dim=0, o_dim=1, hidden_size=latent_dim,
                                         leaky=True, sigmoid=sigmoid, return_features=return_features, acts=acts)
+        self.decoder_scf = DecoderInner(dim=3, z_dim=latent_dim, c_dim=0, o_dim=5, hidden_size=latent_dim,
+                                        leaky=True, sigmoid=False, return_features=return_features, acts=acts)
 
     def forward(self, input):
         out_dict = {}
@@ -172,6 +174,7 @@ class VNNOccScfNet(nn.Module):
             return out_dict
 
         return out_dict['features']
+
 
 class VNN_ResnetPointnet(nn.Module):
     ''' DGCNN-based VNN encoder network with ResNet blocks.

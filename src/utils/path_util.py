@@ -14,7 +14,7 @@ def get_ndf_share():
 
 
 def get_ndf_data():
-    return osp.join(get_ndf_src(), 'data')
+    return osp.join(get_ndf_src())
 
 
 def get_ndf_recon_data():
