@@ -65,14 +65,14 @@ class JointNonShapenetTrainDataset(Dataset):
         self.multiview_aug = multiview_aug
         self.single_view = single_view
 
-        # if obj_class == "cup":
-        #     block = 128
-        # else:
-        #     block = 256
-        # bs = 1 / block
-        # hbs = bs * 0.5
-        # self.bs = bs
-        # self.hbs = hbs
+        if obj_class == "hammer":
+            block = 512
+        else:
+            block = 256
+        bs = 1 / block
+        hbs = bs * 0.5
+        self.bs = bs
+        self.hbs = hbs
 
         self.projection_mode = "perspective"
 
@@ -169,8 +169,8 @@ class JointNonShapenetTrainDataset(Dataset):
             label_sdf = sdf[rix[:1500]]
             label_scf = scf[rix[:1500]]
 
-            # offset = np.random.uniform(-self.hbs, self.hbs, coord.shape)
-            # coord = coord + offset
+            offset = np.random.uniform(-self.hbs, self.hbs, coord.shape)
+            coord = coord + offset
             # if self.obj_class == "container":
             #     coord = coord * data['norm_factor']
             # coord = coord / 0.9 * data['mesh_scale']
@@ -203,6 +203,10 @@ class JointNonShapenetTrainDataset(Dataset):
                 points_world.append(dp_np[..., :3])
 
             point_cloud = torch.cat(points_world, dim=0)
+
+            # filter out potential outliers
+            pcd_mean = torch.mean(point_cloud, dim=0)
+            point_cloud = point_cloud[torch.linalg.norm(point_cloud - pcd_mean, dim=1) < 0.35]
 
             rix = torch.randperm(point_cloud.size(0))
             point_cloud = point_cloud[rix[:1000]]
@@ -410,6 +414,10 @@ class JointShapenetTrainDataset(Dataset):
                 points_world.append(dp_np[..., :3])
 
             point_cloud = torch.cat(points_world, dim=0)
+
+            # filter out potential outliers
+            pcd_mean = torch.mean(point_cloud, dim=0)
+            point_cloud = point_cloud[torch.linalg.norm(point_cloud - pcd_mean, dim=1) < 0.35]
 
             rix = torch.randperm(point_cloud.size(0))
             point_cloud = point_cloud[rix[:1000]]
