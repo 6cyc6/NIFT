@@ -40,10 +40,10 @@ def multiscale_training(model, lr, steps_til_summary, epochs_til_checkpoint, mod
                                   gpus=gpus, rank=rank, max_steps=max_steps)
 
 
-def train_occ_sdf_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs_til_checkpoint, model_dir, loss_fn,
+def train_occ_sdf_scf(model, train_dataloader, epochs, lr, steps_til_validation, epochs_til_checkpoint, model_dir, loss_fn,
                       val_dataloader=None, clip_grad=False, val_loss_fn=None,
-                      overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0, mtl=False,
-                      lw=0.5, max_steps=None, lr_schedule=False):
+                      overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0,
+                      mtl=False, lw=0.5, max_steps=None, lr_schedule=False):
 
     if optimizers is None:
         if mtl:
@@ -58,8 +58,9 @@ def train_occ_sdf_scf(model, train_dataloader, epochs, lr, steps_til_summary, ep
     if val_dataloader is not None:
         assert val_loss_fn is not None, "If validation set is passed, have to pass a validation loss_fn!"
 
+    # learning rate decay
     if lr_schedule:
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizers[0], step_size=50, gamma=0.2)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizers[0], step_size=80, gamma=0.2)
 
     if rank == 0:
         if os.path.exists(model_dir):
@@ -175,7 +176,7 @@ def train_occ_sdf_scf(model, train_dataloader, epochs, lr, steps_til_summary, ep
                     pbar.update(1)
 
                 # run validation
-                if not total_steps % steps_til_summary and rank == 0:
+                if not total_steps % steps_til_validation and rank == 0:
                     print("Epoch %d, Total loss %0.6f, iteration time %0.6f" % (epoch, train_loss, time.time() - start_time))
                     loss_sum = 0
                     if val_dataloader is not None:
@@ -273,10 +274,10 @@ def train_occ_sdf_scf(model, train_dataloader, epochs, lr, steps_til_summary, ep
         return model, optimizers
 
 
-def train_sdf_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs_til_checkpoint, model_dir, loss_fn,
-                  summary_fn=None, iters_til_checkpoint=None, val_dataloader=None, clip_grad=False, val_loss_fn=None,
-                  overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0, mtl=False,
-                  lw=0.5, max_steps=None, lr_schedule=False):
+def train_sdf_scf(model, train_dataloader, epochs, lr, steps_til_validation, epochs_til_checkpoint, model_dir, loss_fn,
+                  val_dataloader=None, clip_grad=False, val_loss_fn=None,
+                  overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0,
+                  mtl=False, lw=0.5, max_steps=None, lr_schedule=False):
 
     if optimizers is None:
         if mtl:
@@ -291,7 +292,7 @@ def train_sdf_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
         assert val_loss_fn is not None, "If validation set is passed, have to pass a validation loss_fn!"
 
     if lr_schedule:
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizers[0], step_size=50, gamma=0.2)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizers[0], step_size=80, gamma=0.2)
 
     if rank == 0:
         if os.path.exists(model_dir):
@@ -312,18 +313,25 @@ def train_sdf_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
 
         writer = SummaryWriter(summaries_dir)
 
-    val_loss_min = 1
+    val_loss_sdf_min = 1
     total_steps = 0
+
+    # start training
     with tqdm(total=len(train_dataloader) * epochs) as pbar:
         train_losses = []
-        train_occ_losses = []
+        train_sdf_losses = []
         train_scf_losses = []
         for epoch in range(epochs):
+            # save model and training loss after a fixed number of epochs
             if not epoch % epochs_til_checkpoint and epoch and rank == 0:
                 torch.save(model.state_dict(),
                            os.path.join(checkpoints_dir, 'model_epoch_%04d_iter_%06d.pth' % (epoch, total_steps)))
-                np.savetxt(os.path.join(checkpoints_dir, 'train_losses_%04d_iter_%06d.pth' % (epoch, total_steps)),
+                np.savetxt(os.path.join(checkpoints_dir, 'train_losses_total_final.txt'),
                            np.array(train_losses))
+                np.savetxt(os.path.join(checkpoints_dir, 'train_losses_sdf_final.txt'),
+                           np.array(train_sdf_losses))
+                np.savetxt(os.path.join(checkpoints_dir, 'train_losses_scf_final.txt'),
+                           np.array(train_scf_losses))
 
             for step, (model_input, gt) in enumerate(train_dataloader):
                 model_input = util.dict_to_gpu(model_input)
@@ -338,8 +346,17 @@ def train_sdf_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
                 train_loss = 0.
                 for loss_name, loss in losses.items():
                     single_loss = loss.mean()
+
+                    # save non-weighted loss for each head
+                    if loss_name == "sdf":
+                        train_sdf_losses.append(single_loss.item())
+                    else:
+                        train_scf_losses.append(single_loss.item())
+
                     if rank == 0:
-                        writer.add_scalar(loss_name, single_loss, total_steps)
+                        writer.add_scalar("train_" + loss_name, single_loss, total_steps)
+
+                    # compute weighted loss
                     if mtl:
                         if loss_name == "sdf":
                             single_loss = torch.exp(-log_var_sdf) * single_loss + log_var_sdf
@@ -351,24 +368,16 @@ def train_sdf_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
                         else:
                             single_loss *= (1 - lw)
 
-                    # if loss_name == "occ":
-                    #     train_occ_losses.append(single_loss.item())
-                    # else:
-                    #     train_scf_losses.append(single_loss.item())
-
                     if rank == 0:
                         writer.add_scalar("train_weighted_" + loss_name, single_loss, total_steps)
                     train_loss += single_loss
 
+                # save total weighted loss and write summery
                 train_losses.append(train_loss.item())
                 if rank == 0:
                     writer.add_scalar("total_train_loss", train_loss, total_steps)
 
-                if not total_steps % steps_til_summary and rank == 0:
-                    torch.save(model.state_dict(),
-                               os.path.join(checkpoints_dir, 'model_current.pth'))
-                    summary_fn(model, model_input, gt, model_output, writer, total_steps)
-
+                # calculate gradient
                 for optim in optimizers:
                     optim.zero_grad()
                 train_loss.backward()
@@ -388,7 +397,7 @@ def train_sdf_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
                 if rank == 0:
                     pbar.update(1)
 
-                if not total_steps % steps_til_summary and rank == 0:
+                if not total_steps % steps_til_validation and rank == 0:
                     print("Epoch %d, Total loss %0.6f, iteration time %0.6f" % (epoch, train_loss, time.time() - start_time))
                     loss_sum = 0
                     if val_dataloader is not None:
@@ -396,12 +405,12 @@ def train_sdf_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
                         with torch.no_grad():
                             model.eval()
                             val_losses = defaultdict(list)
-                            for val_i, (model_input, gt) in enumerate(val_dataloader):
-                                model_input = util.dict_to_gpu(model_input)
-                                gt = util.dict_to_gpu(gt)
+                            for val_i, (model_input_i, gt_i) in enumerate(val_dataloader):
+                                model_input_i = util.dict_to_gpu(model_input_i)
+                                gt_i = util.dict_to_gpu(gt_i)
 
-                                model_output = model(model_input)
-                                val_loss = val_loss_fn(model_output, gt, val=True)
+                                model_output_i = model(model_input_i)
+                                val_loss = val_loss_fn(model_output_i, gt_i, val=True)
 
                                 for name, value in val_loss.items():
                                     val_losses[name].append(value.cpu().numpy())
@@ -411,6 +420,8 @@ def train_sdf_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
 
                         for loss_name, loss in val_losses.items():
                             single_loss = np.mean(loss)
+
+                            # save validation loss for each head
                             writer.add_scalar('val_' + loss_name, single_loss, total_steps)
 
                             if loss_name == "sdf":
@@ -418,6 +429,15 @@ def train_sdf_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
                             else:
                                 print(f"scf_loss: {single_loss}")
 
+                            # save best model with the lowest occupancy validation loss
+                            if loss_name == "sdf" and val_loss_sdf_min > single_loss:
+                                val_loss_sdf_min = single_loss
+                                torch.save(model.state_dict(),
+                                           os.path.join(checkpoints_dir, 'best_model_epoch_%04d_iter_%06d.pth' % (epoch, total_steps)))
+                                # np.savetxt(os.path.join(checkpoints_dir, 'train_losses_%04d_iter_%06d.pth' % (epoch, total_steps)),
+                                #            np.array(train_losses))
+
+                            # compute weighted validation loss
                             if mtl:
                                 if loss_name == "sdf":
                                     log_var_sdf_np = log_var_sdf.detach().cpu().numpy()
@@ -435,19 +455,14 @@ def train_sdf_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
                                 print(f"weighted_sdf_loss: {single_loss}")
                             else:
                                 print(f"weighted_scf_loss: {single_loss}")
-                            summary_fn(model, model_input, gt, model_output, writer, total_steps, 'val_')
+
+                            # save weighted validation loss
                             writer.add_scalar('val_weighted' + loss_name, single_loss, total_steps)
 
                             loss_sum += single_loss
 
                         print(f"total_loss: {loss_sum}")
                         model.train()
-
-                if (iters_til_checkpoint is not None) and (not total_steps % iters_til_checkpoint) and rank == 0:
-                    torch.save(model.state_dict(),
-                               os.path.join(checkpoints_dir, 'model_epoch_%04d_iter_%06d.pth' % (epoch, total_steps)))
-                    np.savetxt(os.path.join(checkpoints_dir, 'train_losses_%04d_iter_%06d.pth' % (epoch, total_steps)),
-                               np.array(train_losses))
 
                 total_steps += 1
                 if max_steps is not None and total_steps == max_steps:
@@ -459,18 +474,23 @@ def train_sdf_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
             if lr_schedule:
                 scheduler.step()
 
+        # save final model
         torch.save(model.state_dict(),
                    os.path.join(checkpoints_dir, 'model_final.pth'))
-        np.savetxt(os.path.join(checkpoints_dir, 'train_losses_final.txt'),
+        np.savetxt(os.path.join(checkpoints_dir, 'train_losses_total_final.txt'),
                    np.array(train_losses))
+        np.savetxt(os.path.join(checkpoints_dir, 'train_losses_sdf_final.txt'),
+                   np.array(train_sdf_losses))
+        np.savetxt(os.path.join(checkpoints_dir, 'train_losses_scf_final.txt'),
+                   np.array(train_scf_losses))
 
         return model, optimizers
 
 
-def train_occ_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs_til_checkpoint, model_dir, loss_fn,
-                  summary_fn=None, iters_til_checkpoint=None, val_dataloader=None, clip_grad=False, val_loss_fn=None,
-                  overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0, mtl=False,
-                  lw=0.5, max_steps=None, lr_schedule=False):
+def train_occ_scf(model, train_dataloader, epochs, lr, steps_til_validation, epochs_til_checkpoint, model_dir, loss_fn,
+                  val_dataloader=None, clip_grad=False, val_loss_fn=None,
+                  overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0,
+                  mtl=False, lw=0.5, max_steps=None, lr_schedule=False):
 
     if optimizers is None:
         if mtl:
@@ -485,8 +505,8 @@ def train_occ_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
         assert val_loss_fn is not None, "If validation set is passed, have to pass a validation loss_fn!"
 
     if lr_schedule:
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizers[0], milestones=[200, 300], gamma=0.1)
-        # scheduler = torch.optim.lr_scheduler.StepLR(optimizers[0], step_size=50, gamma=0.2)
+        # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizers[0], milestones=[200, 300], gamma=0.1)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizers[0], step_size=80, gamma=0.2)
 
     if rank == 0:
         if os.path.exists(model_dir):
@@ -507,18 +527,25 @@ def train_occ_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
 
         writer = SummaryWriter(summaries_dir)
 
-    val_loss_min = 1
+    val_loss_occ_min = 1
     total_steps = 0
+
+    # start training
     with tqdm(total=len(train_dataloader) * epochs) as pbar:
         train_losses = []
         train_occ_losses = []
         train_scf_losses = []
         for epoch in range(epochs):
+            # save model and training loss after a fixed number of epochs
             if not epoch % epochs_til_checkpoint and epoch and rank == 0:
                 torch.save(model.state_dict(),
-                           os.path.join(checkpoints_dir, 'model_epoch_%04d_iter_%06d.pth' % (epoch, total_steps)))
-                np.savetxt(os.path.join(checkpoints_dir, 'train_losses_%04d_iter_%06d.pth' % (epoch, total_steps)),
+                           os.path.join(checkpoints_dir, 'model_final.pth'))
+                np.savetxt(os.path.join(checkpoints_dir, 'train_losses_total_final.txt'),
                            np.array(train_losses))
+                np.savetxt(os.path.join(checkpoints_dir, 'train_losses_occ_final.txt'),
+                           np.array(train_occ_losses))
+                np.savetxt(os.path.join(checkpoints_dir, 'train_losses_scf_final.txt'),
+                           np.array(train_scf_losses))
 
             for step, (model_input, gt) in enumerate(train_dataloader):
                 model_input = util.dict_to_gpu(model_input)
@@ -533,8 +560,17 @@ def train_occ_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
                 train_loss = 0.
                 for loss_name, loss in losses.items():
                     single_loss = loss.mean()
+
+                    # save non-weighted loss for each head
+                    if loss_name == "occ":
+                        train_occ_losses.append(single_loss.item())
+                    else:
+                        train_scf_losses.append(single_loss.item())
+
                     if rank == 0:
-                        writer.add_scalar(loss_name, single_loss, total_steps)
+                        writer.add_scalar("train_" + loss_name, single_loss, total_steps)
+
+                    # compute weighted loss
                     if mtl:
                         if loss_name == "occ":
                             single_loss = torch.exp(-log_var_occ) * single_loss + log_var_occ
@@ -546,24 +582,17 @@ def train_occ_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
                         else:
                             single_loss *= (1 - lw)
 
-                    # if loss_name == "occ":
-                    #     train_occ_losses.append(single_loss.item())
-                    # else:
-                    #     train_scf_losses.append(single_loss.item())
-
+                    # write summery
                     if rank == 0:
                         writer.add_scalar("train_weighted_" + loss_name, single_loss, total_steps)
                     train_loss += single_loss
 
+                # save total weighted loss and write summery
                 train_losses.append(train_loss.item())
                 if rank == 0:
                     writer.add_scalar("total_train_loss", train_loss, total_steps)
 
-                if not total_steps % steps_til_summary and rank == 0:
-                    torch.save(model.state_dict(),
-                               os.path.join(checkpoints_dir, 'model_current.pth'))
-                    summary_fn(model, model_input, gt, model_output, writer, total_steps)
-
+                # calculate gradient
                 for optim in optimizers:
                     optim.zero_grad()
                 train_loss.backward()
@@ -583,7 +612,8 @@ def train_occ_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
                 if rank == 0:
                     pbar.update(1)
 
-                if not total_steps % steps_til_summary and rank == 0:
+                # run validation
+                if not total_steps % steps_til_validation and rank == 0:
                     print("Epoch %d, Total loss %0.6f, iteration time %0.6f" % (epoch, train_loss, time.time() - start_time))
                     loss_sum = 0
                     if val_dataloader is not None:
@@ -591,12 +621,12 @@ def train_occ_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
                         with torch.no_grad():
                             model.eval()
                             val_losses = defaultdict(list)
-                            for val_i, (model_input, gt) in enumerate(val_dataloader):
-                                model_input = util.dict_to_gpu(model_input)
-                                gt = util.dict_to_gpu(gt)
+                            for val_i, (model_input_i, gt_i) in enumerate(val_dataloader):
+                                model_input_i = util.dict_to_gpu(model_input_i)
+                                gt_i = util.dict_to_gpu(gt_i)
 
-                                model_output = model(model_input)
-                                val_loss = val_loss_fn(model_output, gt, val=True)
+                                model_output_i = model(model_input_i)
+                                val_loss = val_loss_fn(model_output_i, gt_i, val=True)
 
                                 for name, value in val_loss.items():
                                     val_losses[name].append(value.cpu().numpy())
@@ -606,6 +636,8 @@ def train_occ_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
 
                         for loss_name, loss in val_losses.items():
                             single_loss = np.mean(loss)
+
+                            # save validation loss for each head
                             writer.add_scalar('val_' + loss_name, single_loss, total_steps)
 
                             if loss_name == "occ":
@@ -613,6 +645,15 @@ def train_occ_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
                             else:
                                 print(f"scf_loss: {single_loss}")
 
+                            # save best model with the lowest occupancy validation loss
+                            if loss_name == "occ" and val_loss_occ_min > single_loss:
+                                val_loss_occ_min = single_loss
+                                torch.save(model.state_dict(),
+                                           os.path.join(checkpoints_dir, 'best_model_epoch_%04d_iter_%06d.pth' % (epoch, total_steps)))
+                                # np.savetxt(os.path.join(checkpoints_dir, 'train_losses_%04d_iter_%06d.pth' % (epoch, total_steps)),
+                                #            np.array(train_losses))
+
+                            # compute weighted validation loss
                             if mtl:
                                 if loss_name == "occ":
                                     log_var_occ_np = log_var_occ.detach().cpu().numpy()
@@ -630,19 +671,14 @@ def train_occ_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
                                 print(f"weighted_occ_loss: {single_loss}")
                             else:
                                 print(f"weighted_scf_loss: {single_loss}")
-                            summary_fn(model, model_input, gt, model_output, writer, total_steps, 'val_')
+
+                            # save weighted validation loss
                             writer.add_scalar('val_weighted' + loss_name, single_loss, total_steps)
 
                             loss_sum += single_loss
 
                         print(f"total_loss: {loss_sum}")
                         model.train()
-
-                if (iters_til_checkpoint is not None) and (not total_steps % iters_til_checkpoint) and rank == 0:
-                    torch.save(model.state_dict(),
-                               os.path.join(checkpoints_dir, 'model_epoch_%04d_iter_%06d.pth' % (epoch, total_steps)))
-                    np.savetxt(os.path.join(checkpoints_dir, 'train_losses_%04d_iter_%06d.pth' % (epoch, total_steps)),
-                               np.array(train_losses))
 
                 total_steps += 1
                 if max_steps is not None and total_steps == max_steps:
@@ -654,10 +690,15 @@ def train_occ_scf(model, train_dataloader, epochs, lr, steps_til_summary, epochs
             if lr_schedule:
                 scheduler.step()
 
-        torch.save(model.state_dict(),
-                   os.path.join(checkpoints_dir, 'model_final.pth'))
-        np.savetxt(os.path.join(checkpoints_dir, 'train_losses_final.txt'),
-                   np.array(train_losses))
+            # save final model
+            torch.save(model.state_dict(),
+                       os.path.join(checkpoints_dir, 'model_final.pth'))
+            np.savetxt(os.path.join(checkpoints_dir, 'train_losses_total_final.txt'),
+                       np.array(train_losses))
+            np.savetxt(os.path.join(checkpoints_dir, 'train_losses_occ_final.txt'),
+                       np.array(train_occ_losses))
+            np.savetxt(os.path.join(checkpoints_dir, 'train_losses_scf_final.txt'),
+                       np.array(train_scf_losses))
 
         return model, optimizers
 
@@ -796,16 +837,20 @@ def train(model, train_dataloader, epochs, lr, steps_til_summary, epochs_til_che
         return model, optimizers
 
 
-def train_feature(model, train_dataloader, corr_model, epochs, lr, steps_til_summary, epochs_til_checkpoint, model_dir, loss_fn,
-          summary_fn=None, iters_til_checkpoint=None, val_dataloader=None, clip_grad=False, val_loss_fn=None,
-          overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0, max_steps=None):
+def train_occ(model, train_dataloader, epochs, lr, steps_til_validation, epochs_til_checkpoint, model_dir, loss_fn,
+              val_dataloader=None, clip_grad=False, val_loss_fn=None,
+              overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0,
+              max_steps=None, lr_schedule=False):
 
-    model.eval()
     if optimizers is None:
-        optimizers = [torch.optim.Adam(lr=lr, params=corr_model.parameters())]
+        optimizers = [torch.optim.Adam(lr=lr, params=model.parameters())]
 
     if val_dataloader is not None:
         assert val_loss_fn is not None, "If validation set is passed, have to pass a validation loss_fn!"
+
+    if lr_schedule:
+        # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizers[0], milestones=[200, 300], gamma=0.1)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizers[0], step_size=80, gamma=0.2)
 
     if rank == 0:
         if os.path.exists(model_dir):
@@ -826,14 +871,18 @@ def train_feature(model, train_dataloader, corr_model, epochs, lr, steps_til_sum
 
         writer = SummaryWriter(summaries_dir)
 
+    val_loss_occ_min = 1
     total_steps = 0
+
+    # start training
     with tqdm(total=len(train_dataloader) * epochs) as pbar:
         train_losses = []
         for epoch in range(epochs):
+            # save model and training loss after a fixed number of epochs
             if not epoch % epochs_til_checkpoint and epoch and rank == 0:
                 torch.save(model.state_dict(),
-                           os.path.join(checkpoints_dir, 'model_epoch_%04d_iter_%06d.pth' % (epoch, total_steps)))
-                np.savetxt(os.path.join(checkpoints_dir, 'train_losses_%04d_iter_%06d.pth' % (epoch, total_steps)),
+                           os.path.join(checkpoints_dir, 'model_final.pth'))
+                np.savetxt(os.path.join(checkpoints_dir, 'train_losses_total_final.txt'),
                            np.array(train_losses))
 
             for step, (model_input, gt) in enumerate(train_dataloader):
@@ -842,31 +891,21 @@ def train_feature(model, train_dataloader, corr_model, epochs, lr, steps_til_sum
 
                 start_time = time.time()
 
-                with torch.no_grad():
-                    model_output = model(model_input)
-
-                model_output = corr_model(model_output['features'])
-
+                model_output = model(model_input)
                 losses = loss_fn(model_output, gt)
                 # losses = loss_fn(model_output, gt, model_input, model)
 
                 train_loss = 0.
                 for loss_name, loss in losses.items():
                     single_loss = loss.mean()
-
-                    if rank == 0:
-                        writer.add_scalar(loss_name, single_loss, total_steps)
                     train_loss += single_loss
 
+                # save total weighted loss and write summery
                 train_losses.append(train_loss.item())
                 if rank == 0:
-                    writer.add_scalar("total_train_loss", train_loss, total_steps)
+                    writer.add_scalar("train_loss", train_loss, total_steps)
 
-                if not total_steps % steps_til_summary and rank == 0:
-                    torch.save(model.state_dict(),
-                               os.path.join(checkpoints_dir, 'model_current.pth'))
-                    summary_fn(model, model_input, gt, model_output, writer, total_steps)
-
+                # calculate gradient
                 for optim in optimizers:
                     optim.zero_grad()
                 train_loss.backward()
@@ -886,21 +925,21 @@ def train_feature(model, train_dataloader, corr_model, epochs, lr, steps_til_sum
                 if rank == 0:
                     pbar.update(1)
 
-                if not total_steps % steps_til_summary and rank == 0:
+                # run validation
+                if not total_steps % steps_til_validation and rank == 0:
                     print("Epoch %d, Total loss %0.6f, iteration time %0.6f" % (epoch, train_loss, time.time() - start_time))
+                    loss_sum = 0
                     if val_dataloader is not None:
                         print("Running validation set...")
                         with torch.no_grad():
+                            model.eval()
                             val_losses = defaultdict(list)
-                            for val_i, (model_input, gt) in enumerate(val_dataloader):
-                                model_input = util.dict_to_gpu(model_input)
-                                gt = util.dict_to_gpu(gt)
+                            for val_i, (model_input_i, gt_i) in enumerate(val_dataloader):
+                                model_input_i = util.dict_to_gpu(model_input_i)
+                                gt_i = util.dict_to_gpu(gt_i)
 
-                                with torch.no_grad():
-                                    model_output = model(model_input)
-
-                                model_output = corr_model(model_output['features'])
-                                val_loss = val_loss_fn(model_output, gt, val=True)
+                                model_output_i = model(model_input_i)
+                                val_loss = val_loss_fn(model_output_i, gt_i, val=True)
 
                                 for name, value in val_loss.items():
                                     val_losses[name].append(value.cpu().numpy())
@@ -908,28 +947,35 @@ def train_feature(model, train_dataloader, corr_model, epochs, lr, steps_til_sum
                                 if val_i == batches_per_validation:
                                     break
 
-                            for loss_name, loss in val_losses.items():
-                                single_loss = np.mean(loss)
-                                summary_fn(model, model_input, gt, model_output, writer, total_steps, 'val_')
-                                writer.add_scalar('val_' + loss_name, single_loss, total_steps)
+                        for loss_name, loss in val_losses.items():
+                            single_loss = np.mean(loss)
+                            loss_sum += single_loss
 
-
-                if (iters_til_checkpoint is not None) and (not total_steps % iters_til_checkpoint) and rank == 0:
-                    torch.save(model.state_dict(),
-                               os.path.join(checkpoints_dir, 'model_epoch_%04d_iter_%06d.pth' % (epoch, total_steps)))
-                    np.savetxt(os.path.join(checkpoints_dir, 'train_losses_%04d_iter_%06d.pth' % (epoch, total_steps)),
-                               np.array(train_losses))
+                        print(f"total_loss: {loss_sum}")
+                        # save best model with the lowest occupancy validation loss
+                        if val_loss_occ_min > loss_sum:
+                            val_loss_occ_min = loss_sum
+                            torch.save(model.state_dict(),
+                                       os.path.join(checkpoints_dir,
+                                                    'best_model_epoch_%04d_iter_%06d.pth' % (epoch, total_steps)))
+                            # np.savetxt(os.path.join(checkpoints_dir, 'train_losses_%04d_iter_%06d.pth' % (epoch, total_steps)),
+                            #            np.array(train_losses))
+                        model.train()
 
                 total_steps += 1
-                if max_steps is not None and total_steps==max_steps:
+                if max_steps is not None and total_steps == max_steps:
                     break
 
-            if max_steps is not None and total_steps==max_steps:
+            if max_steps is not None and total_steps == max_steps:
                 break
 
-        torch.save(model.state_dict(),
-                   os.path.join(checkpoints_dir, 'model_final.pth'))
-        np.savetxt(os.path.join(checkpoints_dir, 'train_losses_final.txt'),
-                   np.array(train_losses))
+            if lr_schedule:
+                scheduler.step()
+
+            # save final model
+            torch.save(model.state_dict(),
+                       os.path.join(checkpoints_dir, 'model_final.pth'))
+            np.savetxt(os.path.join(checkpoints_dir, 'train_losses_total_final.txt'),
+                       np.array(train_losses))
 
         return model, optimizers

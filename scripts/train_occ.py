@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import DataLoader
 
 
-from src.model.vnn_occ_scf_net import VNNOccScfNetMulti
+from src.model.vnn_occ_net import VNNOccNet
 from src.training import losses, training, dataio_new
 
 p = configargparse.ArgumentParser()
@@ -37,8 +37,6 @@ p.add_argument('--single_view_aug', action='store_true', help='single_view_augme
 p.add_argument('--checkpoint_path', default=None, help='Checkpoint to trained model.')
 p.add_argument('--dgcnn', action='store_true', help='If you want to use a DGCNN encoder instead of pointnet (requires more GPU memory)')
 
-p.add_argument('--mtl', action='store_true', help='multi_task_learning')
-p.add_argument('--lw', type=float, default=0.5)
 p.add_argument('--schedule', action='store_true', help='learning rate decay')
 
 opt = p.parse_args()
@@ -72,7 +70,7 @@ train_dataloader = DataLoader(train_dataset, batch_size=opt.batch_size, shuffle=
 val_dataloader = DataLoader(val_dataset, batch_size=opt.batch_size, shuffle=True,
                             drop_last=True, num_workers=4, pin_memory=True)
 
-model = VNNOccScfNetMulti(latent_dim=256, sigmoid=True).cuda()
+model = VNNOccNet(latent_dim=256, sigmoid=True).cuda()
 
 if opt.checkpoint_path is not None:
     model.load_state_dict(torch.load(opt.checkpoint_path))
@@ -83,12 +81,12 @@ model_parallel = model
 
 # Define the loss
 root_path = os.path.join(opt.logging_root, opt.experiment_name)
-loss_fn = val_loss_fn = losses.occ_scf_net
+loss_fn = val_loss_fn = losses.occupancy
 
-training.train_occ_scf(model=model_parallel, train_dataloader=train_dataloader, val_dataloader=val_dataloader,
-                       epochs=opt.num_epochs, lr=opt.lr,
-                       steps_til_validation=opt.steps_til_validation, epochs_til_checkpoint=opt.epochs_til_ckpt,
-                       loss_fn=loss_fn, val_loss_fn=val_loss_fn, clip_grad=False,
-                       mtl=opt.mtl, lw=opt.lw, lr_schedule=opt.schedule,
-                       model_dir=root_path, overwrite=True)
+training.train_occ(model=model_parallel, train_dataloader=train_dataloader, val_dataloader=val_dataloader,
+                   epochs=opt.num_epochs, lr=opt.lr,
+                   steps_til_validation=opt.steps_til_validation, epochs_til_checkpoint=opt.epochs_til_ckpt,
+                   loss_fn=loss_fn, val_loss_fn=val_loss_fn, clip_grad=False,
+                   lr_schedule=opt.schedule,
+                   model_dir=root_path, overwrite=True)
 

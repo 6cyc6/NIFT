@@ -9,7 +9,6 @@ from scipy.spatial.transform import Rotation
 import pickle
 
 from ..utils import path_util, geometry
-from scipy.special import softmax
 
 
 def transform_pcd(pcd, transform):
@@ -20,8 +19,7 @@ def transform_pcd(pcd, transform):
 
 
 class JointNonShapenetTrainDataset(Dataset):
-    def __init__(self, sidelength, single_view=False, depth_aug=False, multiview_aug=False, phase='train', obj_class='all', o_dim=5):
-        self.o_dim = o_dim
+    def __init__(self, sidelength, single_view=False, depth_aug=False, multiview_aug=False, phase='train', obj_class='all'):
         # Path setup (change to folder where your training data is kept)
         # these are the names of the full dataset folders
         assert obj_class in ["hammer", "cup", "container"], "Unrecognized object class"
@@ -169,8 +167,8 @@ class JointNonShapenetTrainDataset(Dataset):
             label_sdf = sdf[rix[:1500]]
             label_scf = scf[rix[:1500]]
 
-            offset = np.random.uniform(-self.hbs, self.hbs, coord.shape)
-            coord = coord + offset
+            # offset = np.random.uniform(-self.hbs, self.hbs, coord.shape)
+            # coord = coord + offset
             # if self.obj_class == "container":
             #     coord = coord * data['norm_factor']
             # coord = coord / 0.9 * data['mesh_scale']
@@ -239,8 +237,7 @@ class JointNonShapenetTrainDataset(Dataset):
 
 
 class JointShapenetTrainDataset(Dataset):
-    def __init__(self, sidelength, single_view=False, depth_aug=False, multiview_aug=False, phase='train', obj_class='all', o_dim=5):
-        self.o_dim = o_dim
+    def __init__(self, sidelength, single_view=False, depth_aug=False, multiview_aug=False, phase='train', obj_class='all'):
         # Path setup (change to folder where your training data is kept)
         # these are the names of the full dataset folders
         assert obj_class in ["mug", "bowl", "bottle"], "Unrecognized object class"
@@ -380,8 +377,8 @@ class JointShapenetTrainDataset(Dataset):
             label_sdf = sdf[rix[:1500]]
             label_scf = scf[rix[:1500]]
 
-            offset = np.random.uniform(-self.hbs, self.hbs, coord.shape)
-            coord = coord + offset
+            # offset = np.random.uniform(-self.hbs, self.hbs, coord.shape)
+            # coord = coord + offset
             # if self.obj_class == "container":
             #     coord = coord * data['norm_factor']
             # coord = coord / 0.9 * data['mesh_scale']
